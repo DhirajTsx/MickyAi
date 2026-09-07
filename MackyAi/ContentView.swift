@@ -1,24 +1,22 @@
-//
-//  ContentView.swift
-//  MackyAi
-//
-//  Created by Dhiraj Bhawsar on 07/09/26.
-//
-
 import SwiftUI
 
-struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
+/// Main window interface for Mackey AI.
+public struct ContentView: View {
+    @ObservedObject var state: AssistantState
+
+    public init(state: AssistantState) {
+        self.state = state
+    }
+
+    public var body: some View {
+        MenuBarView(state: state)
+            .frame(width: 440, height: 600)
+            .onAppear {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(state: AssistantState())
 }

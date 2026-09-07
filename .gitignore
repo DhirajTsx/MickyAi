@@ -1,0 +1,17 @@
+# macOS system files
+.DS_Store
+
+# Environment & Secrets (Never commit secrets!)
+.env
+.env.local
+*.xcconfig
+
+# Xcode user state & build files
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcbkptlist
+
+# Antigravity IDE scratch
+.system_generated/
