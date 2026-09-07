@@ -61,6 +61,22 @@ public final class AssistantState: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Handle speech recognition / audio permission errors gracefully
+        speechRecognizer.$errorMessage
+            .receive(on: RunLoop.main)
+            .sink { [weak self] errorMsg in
+                guard let self = self, let errorMsg = errorMsg, !errorMsg.isEmpty else { return }
+                self.isListening = false
+                self.status = .error(message: errorMsg)
+                let errorBubble = ChatMessage(
+                    role: .assistant,
+                    content: "⚠️ \(errorMsg)",
+                    status: .failed
+                )
+                self.messages.append(errorBubble)
+            }
+            .store(in: &cancellables)
     }
 
     /// Sends a user message and triggers the AI thinking, tool routing, and response pipeline.

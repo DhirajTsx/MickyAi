@@ -43,6 +43,7 @@ public enum PermissionType: String, CaseIterable, Identifiable, Sendable {
     case microphone = "Microphone"
     case speechRecognition = "Speech Recognition"
     case accessibility = "Accessibility"
+    case automation = "Automation"
     case screenRecording = "Screen Recording"
 
     public var id: String { rawValue }
@@ -57,6 +58,8 @@ public enum PermissionType: String, CaseIterable, Identifiable, Sendable {
             return "waveform.badge.mic"
         case .accessibility:
             return "hand.raised.fill"
+        case .automation:
+            return "command.square.fill"
         case .screenRecording:
             return "camera.viewfinder"
         }
@@ -69,9 +72,11 @@ public enum PermissionType: String, CaseIterable, Identifiable, Sendable {
         case .speechRecognition:
             return "Required to convert your voice into structured text commands on your Mac."
         case .accessibility:
-            return "Required to interact with open applications, read UI elements, and automate Mac controls."
+            return "Required for global Option+Space hotkey and interacting with Mac controls."
+        case .automation:
+            return "Required to control Mac applications like Safari, Music, and Finder via AppleEvents."
         case .screenRecording:
-            return "Required when you ask Mackey AI to capture screenshots or analyze visible content on screen."
+            return "Required when you ask Mackey AI to capture screenshots or inspect visible windows."
         }
     }
 
@@ -83,6 +88,8 @@ public enum PermissionType: String, CaseIterable, Identifiable, Sendable {
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
         case .accessibility:
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        case .automation:
+            return "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
         case .screenRecording:
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
         }
@@ -97,10 +104,28 @@ public final class PermissionManager: ObservableObject {
     @Published public var microphoneStatus: PermissionStatus = .notDetermined
     @Published public var speechRecognitionStatus: PermissionStatus = .notDetermined
     @Published public var accessibilityStatus: PermissionStatus = .notDetermined
+    @Published public var automationStatus: PermissionStatus = .notDetermined
     @Published public var screenRecordingStatus: PermissionStatus = .notDetermined
+
+    private var appActiveObserver: NSObjectProtocol?
 
     public init() {
         checkAllPermissions()
+
+        // Automatically re-check permissions when the app gains focus (e.g. user returns from System Settings)
+        appActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.checkAllPermissions()
+        }
+    }
+
+    deinit {
+        if let observer = appActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     /// Checks the status of all permissions without prompting the user.
@@ -108,6 +133,7 @@ public final class PermissionManager: ObservableObject {
         checkMicrophonePermission()
         checkSpeechRecognitionPermission()
         checkAccessibilityPermission()
+        checkAutomationPermission()
         checkScreenRecordingPermission()
     }
 
@@ -119,6 +145,8 @@ public final class PermissionManager: ObservableObject {
             return speechRecognitionStatus
         case .accessibility:
             return accessibilityStatus
+        case .automation:
+            return automationStatus
         case .screenRecording:
             return screenRecordingStatus
         }
@@ -139,11 +167,23 @@ public final class PermissionManager: ObservableObject {
         }
     }
 
+    @discardableResult
+    public func requestMicrophonePermission() async -> Bool {
+        checkMicrophonePermission()
+        if microphoneStatus == .granted { return true }
+        if microphoneStatus == .denied {
+            openSystemSettings(for: .microphone)
+            return false
+        }
+
+        let granted = await AVCaptureDevice.requestAccess(for: .audio)
+        microphoneStatus = granted ? .granted : .denied
+        return granted
+    }
+
     public func requestMicrophonePermission() {
-        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-            Task { @MainActor in
-                self?.microphoneStatus = granted ? .granted : .denied
-            }
+        Task { @MainActor in
+            _ = await self.requestMicrophonePermission()
         }
     }
 
@@ -162,20 +202,29 @@ public final class PermissionManager: ObservableObject {
         }
     }
 
-    public func requestSpeechRecognitionPermission() {
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            Task { @MainActor in
-                switch status {
-                case .authorized:
-                    self?.speechRecognitionStatus = .granted
-                case .denied, .restricted:
-                    self?.speechRecognitionStatus = .denied
-                case .notDetermined:
-                    self?.speechRecognitionStatus = .notDetermined
-                @unknown default:
-                    self?.speechRecognitionStatus = .notDetermined
+    @discardableResult
+    public func requestSpeechRecognitionPermission() async -> Bool {
+        checkSpeechRecognitionPermission()
+        if speechRecognitionStatus == .granted { return true }
+        if speechRecognitionStatus == .denied {
+            openSystemSettings(for: .speechRecognition)
+            return false
+        }
+
+        return await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                Task { @MainActor in
+                    let granted = (status == .authorized)
+                    self?.speechRecognitionStatus = granted ? .granted : .denied
+                    continuation.resume(returning: granted)
                 }
             }
+        }
+    }
+
+    public func requestSpeechRecognitionPermission() {
+        Task { @MainActor in
+            _ = await self.requestSpeechRecognitionPermission()
         }
     }
 
@@ -187,10 +236,43 @@ public final class PermissionManager: ObservableObject {
     }
 
     public func requestAccessibilityPermission() {
-        // Prompts system dialog and directs user to System Settings
         let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         let isTrusted = AXIsProcessTrustedWithOptions(options)
         accessibilityStatus = isTrusted ? .granted : .denied
+        if !isTrusted {
+            openSystemSettings(for: .accessibility)
+        }
+    }
+
+    // MARK: - Automation Permission (AppleEvents)
+
+    public func checkAutomationPermission() {
+        let script = "tell application \"System Events\" to return name of current user"
+        if let appleScript = NSAppleScript(source: script) {
+            var errorDict: NSDictionary?
+            _ = appleScript.executeAndReturnError(&errorDict)
+            if errorDict == nil {
+                automationStatus = .granted
+            } else if let errorNumber = errorDict?[NSAppleScript.errorNumber] as? Int, errorNumber == -1743 {
+                automationStatus = .denied
+            } else {
+                automationStatus = .notDetermined
+            }
+        } else {
+            automationStatus = .notDetermined
+        }
+    }
+
+    public func requestAutomationPermission() {
+        let script = "tell application \"System Events\" to return name of current user"
+        if let appleScript = NSAppleScript(source: script) {
+            var errorDict: NSDictionary?
+            _ = appleScript.executeAndReturnError(&errorDict)
+            if let errorNumber = errorDict?[NSAppleScript.errorNumber] as? Int, errorNumber == -1743 {
+                openSystemSettings(for: .automation)
+            }
+            checkAutomationPermission()
+        }
     }
 
     // MARK: - Screen Recording Permission
@@ -203,6 +285,9 @@ public final class PermissionManager: ObservableObject {
     public func requestScreenRecordingPermission() {
         let hasAccess = CGRequestScreenCaptureAccess()
         screenRecordingStatus = hasAccess ? .granted : .denied
+        if !hasAccess {
+            openSystemSettings(for: .screenRecording)
+        }
     }
 
     // MARK: - System Settings Navigation

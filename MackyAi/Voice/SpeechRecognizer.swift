@@ -29,20 +29,44 @@ public final class SpeechRecognizer: ObservableObject {
     public func startRecording() {
         guard !isRecording else { return }
 
-        // Check permissions
-        if !PermissionManager.shared.microphoneStatus.isGranted {
-            PermissionManager.shared.requestMicrophonePermission()
-        }
-        if !PermissionManager.shared.speechRecognitionStatus.isGranted {
-            PermissionManager.shared.requestSpeechRecognitionPermission()
-        }
-
         errorMessage = nil
         transcript = ""
 
-        // Prepare audio engine & recognizer
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
+            // 1. Verify / request Microphone permission
+            let micGranted = await PermissionManager.shared.requestMicrophonePermission()
+            guard micGranted else {
+                self.errorMessage = "Microphone access is required. Please allow it in System Settings > Privacy & Security > Microphone."
+                return
+            }
+
+            // 2. Verify / request Speech Recognition permission
+            let speechGranted = await PermissionManager.shared.requestSpeechRecognitionPermission()
+            guard speechGranted else {
+                self.errorMessage = "Speech Recognition access is required. Please allow it in System Settings > Privacy & Security > Speech Recognition."
+                return
+            }
+
+            self.beginAudioEngineRecording()
+        }
+    }
+
+    private func beginAudioEngineRecording() {
+        // Reset audio engine to fresh state if needed
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
+
+        guard recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 else {
+            errorMessage = "No active audio input device detected. Please check your Mac sound input settings."
+            return
+        }
 
         // Cancel previous task if any
         recognitionTask?.cancel()
@@ -62,8 +86,6 @@ public final class SpeechRecognizer: ObservableObject {
 
                 if let result = result {
                     self.transcript = result.bestTranscription.formattedString
-
-                    // Reset silence timer on new transcription segment
                     self.resetSilenceTimer()
 
                     if result.isFinal {
@@ -104,7 +126,7 @@ public final class SpeechRecognizer: ObservableObject {
             try audioEngine.start()
             isRecording = true
         } catch {
-            errorMessage = "Audio engine could not start: \(error.localizedDescription)"
+            errorMessage = "Microphone could not start: \(error.localizedDescription)"
             stopRecording()
         }
     }

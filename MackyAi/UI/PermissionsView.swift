@@ -1,9 +1,11 @@
 import SwiftUI
+import Combine
 
 /// View displaying all macOS system permissions required by Mackey AI, their current statuses,
 /// reasons why they are needed, and direct actions to grant or configure them in System Settings.
 public struct PermissionsView: View {
     @ObservedObject var permissions: PermissionManager = .shared
+    private let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     public init() {}
 
@@ -50,6 +52,12 @@ public struct PermissionsView: View {
             .padding(16)
         }
         .onAppear {
+            permissions.checkAllPermissions()
+        }
+        .onReceive(refreshTimer) { _ in
+            permissions.checkAllPermissions()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             permissions.checkAllPermissions()
         }
     }
@@ -137,7 +145,7 @@ public struct PermissionsView: View {
                 permissions.openSystemSettings(for: type)
             }) {
                 HStack(spacing: 3) {
-                    Text("Settings")
+                    Text("Open Settings")
                     Image(systemName: "arrow.up.forward.app")
                         .font(.system(size: 9))
                 }
@@ -156,6 +164,8 @@ public struct PermissionsView: View {
             permissions.requestSpeechRecognitionPermission()
         case .accessibility:
             permissions.requestAccessibilityPermission()
+        case .automation:
+            permissions.requestAutomationPermission()
         case .screenRecording:
             permissions.requestScreenRecordingPermission()
         }
